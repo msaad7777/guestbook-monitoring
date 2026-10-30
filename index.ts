@@ -1,5 +1,6 @@
 import * as k8s from "@pulumi/kubernetes";
 import * as pulumi from "@pulumi/pulumi";
+import * as fs from "fs";
 
 const config = new pulumi.Config();
 const isMinikube = config.getBoolean("isMinikube") ?? true;
@@ -95,6 +96,13 @@ const frontendDeployment = new k8s.apps.v1.Deployment("frontend", {
                         ports: [{ containerPort: 80 }],
                         resources: { requests: { cpu: "100m", memory: "100Mi" } },
                     },
+                    {
+                        name: "apache-exporter",
+                        image: "lusotycoon/apache-exporter:v1.0.12",
+                        args: ["--scrape_uri=http://localhost/server-status?auto"],
+                        ports: [{ name: "metrics", containerPort: 9117 }],
+                        resources: { requests: { cpu: "10m", memory: "32Mi" } },
+                    },
                 ],
             },
         },
@@ -105,6 +113,13 @@ const frontendService = new k8s.core.v1.Service("frontend", {
     spec: {
         type: isMinikube ? "ClusterIP" : "LoadBalancer",
         ports: [{ port: 80 }],
+        selector: frontendLabels,
+    },
+});
+new k8s.core.v1.Service("frontend-metrics", {
+    metadata: { name: "frontend-metrics", labels: frontendLabels },
+    spec: {
+        ports: [{ name: "metrics", port: 9117, targetPort: "metrics" }],
         selector: frontendLabels,
     },
 });
@@ -129,7 +144,7 @@ const monitoring = new k8s.helm.v3.Release("monitoring", {
     },
 });
 
-for (const app of ["redis-leader", "redis-replica"]) {
+for (const app of ["frontend", "redis-leader", "redis-replica"]) {
     new k8s.apiextensions.CustomResource(`${app}-monitor`, {
         apiVersion: "monitoring.coreos.com/v1",
         kind: "ServiceMonitor",
@@ -141,6 +156,11 @@ for (const app of ["redis-leader", "redis-replica"]) {
         },
     }, { dependsOn: [monitoring] });
 }
+
+new k8s.core.v1.ConfigMap("guestbook-dashboard", {
+    metadata: { name: "guestbook-dashboard", namespace: "default", labels: { grafana_dashboard: "1" } },
+    data: { "guestbook.json": fs.readFileSync("dashboard.json", "utf8") },
+}, { dependsOn: [monitoring] });
 
 export const frontendIp = isMinikube
     ? frontendService.spec.clusterIP

@@ -2,7 +2,17 @@
 
 Extends the [Pulumi Kubernetes Guestbook (simple)](https://github.com/pulumi/examples/tree/master/kubernetes-ts-guestbook/simple) with Prometheus and Grafana.
 
-The Guestbook frontend and Redis services remain intact. Prometheus and Grafana are installed with the `kube-prometheus-stack` Helm chart. Redis exporter sidecars expose backend metrics through two ServiceMonitors. Kubernetes container metrics provide frontend CPU and memory utilization. The original PHP frontend does not expose HTTP request or error counters, so these are not claimed here.
+The Guestbook frontend and Redis services remain intact. Prometheus and Grafana are installed with the `kube-prometheus-stack` Helm chart. Exporter sidecars expose metrics from both tiers, and Prometheus discovers them through three ServiceMonitors:
+
+| Component | Exporter | Metrics |
+|---|---|---|
+| PHP frontend | `apache_exporter`, reading Apache `mod_status` on the pod's localhost | Request count (`apache_accesses_total`), workers, exporter health (`apache_up`) |
+| Redis leader and replica | `redis_exporter` | Availability (`redis_up`), commands processed, connected clients |
+| All pods | kubelet/cAdvisor, scraped by the chart | CPU and memory usage |
+
+`mod_status` is already enabled in the Guestbook image and only answers requests from inside the pod, so the PHP application is unchanged. The exporter port is published on a separate ClusterIP Service, `frontend-metrics`, so it stays internal when the frontend Service is a LoadBalancer.
+
+A Grafana dashboard named **Guestbook** is provisioned from `dashboard.json`. It shows frontend request rate, frontend CPU and memory, Redis availability, Redis commands per second, and connected clients.
 
 ## Requirements
 
@@ -61,7 +71,7 @@ Open http://localhost:8080.
 
 ## Verify metrics
 
-Check the monitoring components and Redis exporters:
+Check the monitoring components and exporters:
 
 ```sh
 kubectl get pods
@@ -70,21 +80,28 @@ kubectl get svc monitoring-grafana
 kubectl port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090
 ```
 
-Open http://localhost:9090/targets and confirm the `redis-leader-monitor` and `redis-replica-monitor` targets are UP. They can take two to three minutes to appear after `pulumi up` while Prometheus reloads its configuration. In the Prometheus expression browser, query:
+Open http://localhost:9090/targets and confirm the `frontend-monitor` (three pods), `redis-leader-monitor`, and `redis-replica-monitor` targets are UP. They can take two to three minutes to appear after `pulumi up` while Prometheus reloads its configuration.
+
+Generate some traffic so the request metrics have data:
+
+```sh
+kubectl run load --image=curlimages/curl:8.11.1 --restart=Never --rm -i -- \
+  sh -c 'for i in $(seq 500); do curl -s -o /dev/null http://frontend/; done'
+```
+
+In the Prometheus expression browser, query:
 
 ```promql
+sum by (pod) (rate(apache_accesses_total[5m]))
 redis_up
+sum by (pod) (rate(container_cpu_usage_seconds_total{pod=~"frontend-.*",container="frontend"}[5m]))
 ```
 
-For frontend container utilization, query:
+`apache_accesses_total` should rise by roughly the number of requests sent. `redis_up` should be 1 for both Redis services.
 
-```promql
-rate(container_cpu_usage_seconds_total{pod=~"frontend-.*",container="frontend"}[5m])
-```
+In Grafana, open **Dashboards → Guestbook**, or use the preconfigured Prometheus data source in Explore.
 
-In Grafana, use the preconfigured Prometheus data source and the Explore view to query the same metrics.
-
-If a target is missing, inspect `kubectl get servicemonitor -o yaml`, the service's `metrics` port, and the matching Kubernetes labels. If `redis_up` is zero, check the Redis exporter container logs.
+If a target is missing, inspect `kubectl get servicemonitor -o yaml`, the service's `metrics` port, and the matching Kubernetes labels. If `apache_up` or `redis_up` is zero, check the `apache-exporter` or `redis-exporter` container logs.
 
 ## Clean up
 
@@ -100,4 +117,4 @@ Tested on Minikube 1.39 (Kubernetes 1.37) with the Docker driver.
 
 ## Scope
 
-The implementation monitors Redis availability and Kubernetes resource usage. Per-request frontend latency, request count, and HTTP errors would require instrumenting the PHP application or adding a suitable HTTP metrics exporter. For a short exercise, that change was intentionally left out rather than presenting container metrics as application-level telemetry.
+Apache `mod_status` reports total requests but not response codes or latency, so the dashboard does not show an error rate or latency. Those would need access-log parsing or instrumenting the PHP application, which was left out to keep the Guestbook image unchanged. The exporter's own scrape of `/server-status` counts as one request per pod every 30 seconds, which is visible as a small baseline in the request rate.
