@@ -14,6 +14,8 @@ The Guestbook frontend and Redis services remain intact. Prometheus and Grafana 
 
 A Grafana dashboard named **Guestbook** is provisioned from `dashboard.json`. It shows frontend request rate, frontend CPU and memory, Redis availability, Redis commands per second, and connected clients.
 
+![Guestbook dashboard](screenshots/guestbook-dashboard.png)
+
 ## Requirements
 
 - Node.js and npm
@@ -24,6 +26,13 @@ A Grafana dashboard named **Guestbook** is provisioned from `dashboard.json`. It
 A small local cluster may require several GB of available RAM for the monitoring stack.
 
 ## Deploy
+
+Start a local cluster if you do not already have one:
+
+```sh
+minikube start --cpus=4 --memory=8192
+kubectl get nodes
+```
 
 The local backend encrypts secrets with a passphrase. Set it before running Pulumi commands, or enter it when prompted:
 
